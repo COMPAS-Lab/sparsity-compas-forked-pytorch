@@ -33,6 +33,10 @@ endif()
 
 set(CMAKE_INSTALL_MESSAGE NEVER)
 
+set(CUDNN_LIBRARY_PATH /data01/tianchuji/.local/lib/cudnn/lib/libcudnn.so)
+set(CUDNN_INCLUDE_PATH /data01/tianchuji/.local/lib/cudnn/include)
+set(CUDNN_ROOT /data01/tianchuji/.local/lib/cudnn)
+
 # check and set CMAKE_CXX_STANDARD
 string(FIND "${CMAKE_CXX_FLAGS}" "-std=c++" env_cxx_standard)
 if(env_cxx_standard GREATER -1)

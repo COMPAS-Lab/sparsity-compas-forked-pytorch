@@ -324,7 +324,7 @@ def load_checked_2d(
 """
 
 compute_flex_attention = r"""
-{{def_kernel("Q", "K", "V", "LSE", "KV_NUM_BLKS", "KV_IDX", "FULL_KV_NUM_BLKS", "FULL_KV_IDX")}}
+{{def_kernel("Q", "K", "V", "LSE", "POST_SCORE_NNZ", "KV_NUM_BLKS", "KV_IDX", "FULL_KV_NUM_BLKS", "FULL_KV_IDX")}}
     # Sub notation for this kernel:
     #
     # Q: Query, K: Key, V: Value
@@ -405,6 +405,7 @@ compute_flex_attention = r"""
     # initialize pointer to m and l
     m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
     l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
+    r_nnz = tl.zeros([BLOCK_M], dtype=tl.int32)
     acc = tl.zeros([BLOCK_M, V_HEAD_DIM_ROUNDED], dtype=tl.float32)
 
     offs_m = q_start * BLOCK_M + tl.arange(0, BLOCK_M)
@@ -449,10 +450,10 @@ compute_flex_attention = r"""
     )
     offs_n = kv_start + tl.arange(0, BLOCK_N)
 
-    acc, l_i, m_i = forward_inner(
+    acc, l_i, m_i, r_nnz = forward_inner(
         {{gen_argdefs()}},
         q, K_block_ptr, V_block_ptr, Q_LEN, KV_LEN,
-        acc, l_i, m_i,
+        acc, l_i, m_i, r_nnz,
         off_zq, off_hq, offs_m[:, None], offs_n[None, :],
         kv_indices, kv_num_blocks,
         0, block_n_end,
@@ -488,10 +489,10 @@ compute_flex_attention = r"""
         )
         offs_n = kv_start + tl.arange(0, BLOCK_N)
 
-        acc, l_i, m_i = forward_inner(
+        acc, l_i, m_i, r_nnz = forward_inner(
             {{gen_argdefs()}},
             q, K_block_ptr, V_block_ptr, Q_LEN, KV_LEN,
-            acc, l_i, m_i,
+            acc, l_i, m_i, r_nnz,
             off_zq, off_hq, offs_m[:, None], offs_n[None, :],
             kv_indices, kv_num_blocks,
             0, block_n_end,
@@ -523,6 +524,14 @@ compute_flex_attention = r"""
             tl.store(l_ptrs, lse)
         else:
             tl.store(l_ptrs, lse, mask=offs_m < Q_LEN)
+
+    if OUTPUT_NNZ:
+        off_hz = tl.program_id(1)
+        nnz_ptrs = POST_SCORE_NNZ + off_hz * Q_LEN + offs_m
+        if IS_DIVISIBLE:
+            tl.store(nnz_ptrs, r_nnz)
+        else:
+            tl.store(nnz_ptrs, r_nnz, mask=offs_m < Q_LEN) 
  """
 
 
@@ -532,7 +541,7 @@ def forward_inner(
     {{gen_argdefs()}},
     q, K_block_ptr, V_block_ptr, Q_LEN, KV_LEN,
     # accumulated values
-    acc, l_i, m_i,
+    acc, l_i, m_i, r_nnz,
     # Offsets used as inputs to score_mod & mask_mod
     # of size [BLOCK_M, BLOCK_N] or scalar.
     off_z, off_h, offs_m, offs_n,
@@ -555,11 +564,11 @@ def forward_inner(
     # loop over k, v and update accumulator until block_n_end
     for start_n in range(block_n_start, block_n_end):
         if IS_DIVISIBLE:
-            acc, l_i, m_i = forward_block_mn(
+            acc, l_i, m_i, r_nnz = forward_block_mn(
                 {{gen_argdefs()}},
                 q, K_block_ptr, V_block_ptr, Q_LEN, KV_LEN,
                 # accumulated values
-                acc, l_i, m_i,
+                acc, l_i, m_i, r_nnz,
                 # Offsets
                 off_z, off_h, offs_m, offs_n,
                 MATMUL_PRECISION, RCP_LN2,
@@ -570,11 +579,11 @@ def forward_inner(
             # it's on par or slightly faster than only applying to the last block in fwd.
             # However, we choose different strategy for bwd, where we only apply mod & mask
             # to the last block because it's faster a lot.
-            acc, l_i, m_i = forward_block_mn(
+            acc, l_i, m_i, r_nnz = forward_block_mn(
                 {{gen_argdefs()}},
                 q, K_block_ptr, V_block_ptr, Q_LEN, KV_LEN,
                 # accumulated values
-                acc, l_i, m_i,
+                acc, l_i, m_i, r_nnz,
                 # Offsets
                 off_z, off_h, offs_m, offs_n,
                 MATMUL_PRECISION, RCP_LN2,
@@ -592,7 +601,7 @@ def forward_inner(
 
         offs_n = offs_n + offset
 
-    return acc, l_i, m_i
+    return acc, l_i, m_i, r_nnz
 
 """
 
@@ -603,7 +612,7 @@ def forward_block_mn(
     {{gen_argdefs()}},
     q, K_block_ptr, V_block_ptr, Q_LEN, KV_LEN,
     # accumulated values
-    acc, l_i, m_i,
+    acc, l_i, m_i, r_nnz,
     # Offsets
     off_z, off_h, offs_m, offs_n,
     MATMUL_PRECISION, RCP_LN2,
@@ -658,6 +667,9 @@ def forward_block_mn(
         # apply mask for partially unmasked blocks
         post_mod_scores = tl.where(mask_mod_output, post_mod_scores, float("-inf"))
 
+    post_mod_mask = tl.where(post_mod_scores > float("-inf"), 1, 0)
+    r_nnz = tl.sum(post_mod_mask, axis=-1) + r_nnz
+
     if not PRESCALE_QK:
         post_mod_scores *= RCP_LN2
     # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -685,7 +697,7 @@ def forward_block_mn(
     # -- update m_i
     m_i = m_ij
 
-    return acc, l_i, m_i
+    return acc, l_i, m_i, r_nnz
 
 """
 
@@ -1445,6 +1457,13 @@ def flex_attention(
         dtype=torch.float32,  # The logsumexp is always stored in fp32 regardless of the input dtype
         device=query.get_device(),
     )
+    post_score_nnz_shape = [B, Hq, seq_len_q]
+    post_score_nnz = empty_strided(
+        post_score_nnz_shape,
+        None,
+        dtype=torch.int32,
+        device=query.get_device(),
+    )
     kernel_options.setdefault("SM_SCALE", scale)
 
     # Determine GQA broadcast factor.
@@ -1533,6 +1552,7 @@ def flex_attention(
                 key,
                 value,
                 logsumexp,
+                post_score_nnz,
                 kv_num_blocks,
                 kv_indices,
                 full_kv_num_blocks,
@@ -1557,6 +1577,7 @@ def flex_attention(
             key,
             value,
             logsumexp,
+            post_score_nnz,
             kv_num_blocks,
             kv_indices,
             full_kv_num_blocks,
@@ -1586,6 +1607,7 @@ def flex_attention(
             input_gen_fns=input_gen_fns,
         ),
         logsumexp,
+        post_score_nnz,
     )
 
 

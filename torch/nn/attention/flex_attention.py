@@ -1081,7 +1081,7 @@ def create_nested_block_mask(
 
 
 def _apply_kernel_options(
-    query: Tensor, key: Tensor, value: Tensor, return_lse: bool, kernel_options
+    query: Tensor, key: Tensor, value: Tensor, return_lse: bool, return_nzeros: bool, kernel_options
 ):
     kernel_options = {} if kernel_options is None else dict(kernel_options)
 
@@ -1094,6 +1094,8 @@ def _apply_kernel_options(
     # If forward kernel needs to return logsumexp is decided by this rule internally.
     assert "OUTPUT_LOGSUMEXP" not in kernel_options
     kernel_options["OUTPUT_LOGSUMEXP"] = True
+    kernel_options["OUTPUT_NNZ"] = return_nzeros
+
     if not return_lse:
         # We used to check if q,k,v required grads but since captured buffers can require grad
         # we always write unless in no_grad
@@ -1163,8 +1165,9 @@ def flex_attention(
     scale: Optional[float] = None,
     enable_gqa: bool = False,
     return_lse: bool = False,
+    return_nzeros: bool = False,
     kernel_options: Optional[dict[str, Any]] = None,
-) -> Union[Tensor, tuple[Tensor, Tensor]]:
+) -> dict[str, Tensor]:
     r"""This function implements scaled dot product attention with an arbitrary attention score modification function.
 
     This function computes the scaled dot product attention between query, key, and value tensors with a user-defined
@@ -1311,6 +1314,7 @@ def flex_attention(
         key,
         value,
         return_lse,
+        return_nzeros,
         kernel_options,
     )
 
@@ -1320,13 +1324,17 @@ def flex_attention(
             torch._dynamo.mark_static(x, -3)
             torch._dynamo.mark_static(x, -1)
 
-        out, lse = flex_attention_hop(
+        out, lse, score_nnz = flex_attention_hop(
             query, key, value, score_mod, block_mask.as_tuple(), scale, kernel_options  # type: ignore[union-attr]
         )
+
+        func_ret = {"out": out}
         if return_lse:
-            return out, lse * math.log(2)
-        else:
-            return out
+            func_ret["lse"] = lse
+        if return_nzeros:
+            func_ret["nnz"] = score_nnz
+
+        return func_ret
 
     if not torch._dynamo.is_dynamo_supported():
         raise RuntimeError("flex_attention requires dynamo support")
@@ -1350,7 +1358,7 @@ def flex_attention(
                         )
                     else:
                         backend = "eager"
-                    out, lse = torch.compile(
+                    out, lse, score_nnz = torch.compile(
                         _flex_attention_hop_wrapper, backend=backend, fullgraph=True
                     )(
                         query,
@@ -1361,7 +1369,11 @@ def flex_attention(
                         scale,
                         kernel_options,
                     )
+                    
+                    func_ret = {"out": out}
                     if return_lse:
-                        return out, lse * math.log(2)
-                    else:
-                        return out
+                        func_ret["lse"] = lse
+                    if return_nzeros:
+                        func_ret["nnz"] = score_nnz
+
+                    return func_ret

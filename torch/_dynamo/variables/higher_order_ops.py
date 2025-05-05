@@ -2677,8 +2677,8 @@ class FlexAttentionHigherOrderVariable(TorchHigherOrderOperatorVariable):
         query_meta = query.as_proxy().node.meta["example_value"]
         value_meta = value.as_proxy().node.meta["example_value"]
         with torch._guards.TracingContext.try_get().fake_mode:
-            out_meta, lse_meta = flex_attention_fake_impl(query_meta, value_meta)
-        example_value = (out_meta, lse_meta)
+            out_meta, lse_meta, nnz_meta = flex_attention_fake_impl(query_meta, value_meta)
+        example_value = (out_meta, lse_meta, nnz_meta)
 
         # Compose the ordered HOO args:
         # - inp_args: [query, key, value, block_mask, scale, kernel_options]
