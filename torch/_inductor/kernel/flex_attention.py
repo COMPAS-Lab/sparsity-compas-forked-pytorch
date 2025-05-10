@@ -324,7 +324,7 @@ def load_checked_2d(
 """
 
 compute_flex_attention = r"""
-{{def_kernel("Q", "K", "V", "LSE", "POST_SCORE_NNZ", "KV_NUM_BLKS", "KV_IDX", "FULL_KV_NUM_BLKS", "FULL_KV_IDX")}}
+{{def_kernel("Q", "K", "V", "LSE", "POST_SCORE_FEATURE", "KV_NUM_BLKS", "KV_IDX", "FULL_KV_NUM_BLKS", "FULL_KV_IDX", "SCORE_EXPSUM")}}
     # Sub notation for this kernel:
     #
     # Q: Query, K: Key, V: Value
@@ -341,6 +341,9 @@ compute_flex_attention = r"""
     # FULL_KV_IDX: The indices of fully unmasked KV blocks (so we don't need masking) for each query.
     #
     # OUTPUT_LOGSUMEXP: We only need to store the logsumexp if we require grad
+    # OUTPUT_ROWEXPSUM: output exp sum for future pruning
+    # OUTPUT_NNZ: output non-zero counts per row vector in attention. when this is enabled, score_expsum must be provided
+    # THRESHOLD: threshold for pruning
     #
     # (Modifiable) Performance tuning options
     # BLOCK_M: The thread block size across the seqlen dim of Q.
@@ -374,6 +377,7 @@ compute_flex_attention = r"""
     q_start = tl.program_id(0)
     off_zq = tl.program_id(1) // HQ
     off_hq = tl.program_id(1) % HQ
+    off_hz = tl.program_id(1)
 
     # We support two cases for batch dimension. a) (ZKV == ZQ) where off_zkv = off_zq.
     # b) (ZKV == 1 and ZQ > 1) where KV is broadcasted along the batch dimension and off_zkv=0.
@@ -405,10 +409,11 @@ compute_flex_attention = r"""
     # initialize pointer to m and l
     m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
     l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
-    r_nnz = tl.zeros([BLOCK_M], dtype=tl.int32)
+    r_nnz_or_expsum = tl.zeros([BLOCK_M], dtype=tl.float32)
     acc = tl.zeros([BLOCK_M, V_HEAD_DIM_ROUNDED], dtype=tl.float32)
 
     offs_m = q_start * BLOCK_M + tl.arange(0, BLOCK_M)
+    SCORE_EXPSUM = SCORE_EXPSUM + off_hz * Q_LEN + offs_m
 
     # KV_IDX and KV_NUM_BLKS are always contiguous.
     sparse_hz_offset = sparse_idx_z * SPARSE_HQ + sparse_idx_hq
@@ -450,10 +455,10 @@ compute_flex_attention = r"""
     )
     offs_n = kv_start + tl.arange(0, BLOCK_N)
 
-    acc, l_i, m_i, r_nnz = forward_inner(
+    acc, l_i, m_i, r_nnz_or_expsum = forward_inner(
         {{gen_argdefs()}},
         q, K_block_ptr, V_block_ptr, Q_LEN, KV_LEN,
-        acc, l_i, m_i, r_nnz,
+        acc, l_i, m_i, r_nnz_or_expsum, SCORE_EXPSUM,
         off_zq, off_hq, offs_m[:, None], offs_n[None, :],
         kv_indices, kv_num_blocks,
         0, block_n_end,
@@ -489,10 +494,10 @@ compute_flex_attention = r"""
         )
         offs_n = kv_start + tl.arange(0, BLOCK_N)
 
-        acc, l_i, m_i, r_nnz = forward_inner(
+        acc, l_i, m_i, r_nnz_or_expsum = forward_inner(
             {{gen_argdefs()}},
             q, K_block_ptr, V_block_ptr, Q_LEN, KV_LEN,
-            acc, l_i, m_i, r_nnz,
+            acc, l_i, m_i, r_nnz_or_expsum, SCORE_EXPSUM,
             off_zq, off_hq, offs_m[:, None], offs_n[None, :],
             kv_indices, kv_num_blocks,
             0, block_n_end,
@@ -517,7 +522,6 @@ compute_flex_attention = r"""
     {{store_output(("idx_zq", "idx_hq", "idx_m", "idx_d"), "acc", "mask")}}
 
     if OUTPUT_LOGSUMEXP:
-        off_hz = tl.program_id(1)
         l_ptrs = LSE + off_hz * Q_LEN + offs_m
         lse = m_i + tl.math.log2(l_i)
         if IS_DIVISIBLE:
@@ -525,13 +529,12 @@ compute_flex_attention = r"""
         else:
             tl.store(l_ptrs, lse, mask=offs_m < Q_LEN)
 
-    if OUTPUT_NNZ:
-        off_hz = tl.program_id(1)
-        nnz_ptrs = POST_SCORE_NNZ + off_hz * Q_LEN + offs_m
+    if OUTPUT_NNZ or OUTPUT_EXPSUM:
+        post_score_feature_ptrs = POST_SCORE_FEATURE + off_hz * Q_LEN + offs_m
         if IS_DIVISIBLE:
-            tl.store(nnz_ptrs, r_nnz)
+            tl.store(post_score_feature_ptrs, r_nnz_or_expsum)
         else:
-            tl.store(nnz_ptrs, r_nnz, mask=offs_m < Q_LEN) 
+            tl.store(post_score_feature_ptrs, r_nnz_or_expsum, mask=offs_m < Q_LEN) 
  """
 
 
@@ -541,7 +544,7 @@ def forward_inner(
     {{gen_argdefs()}},
     q, K_block_ptr, V_block_ptr, Q_LEN, KV_LEN,
     # accumulated values
-    acc, l_i, m_i, r_nnz,
+    acc, l_i, m_i, r_nnz, SCORE_EXPSUM,
     # Offsets used as inputs to score_mod & mask_mod
     # of size [BLOCK_M, BLOCK_N] or scalar.
     off_z, off_h, offs_m, offs_n,
@@ -568,7 +571,7 @@ def forward_inner(
                 {{gen_argdefs()}},
                 q, K_block_ptr, V_block_ptr, Q_LEN, KV_LEN,
                 # accumulated values
-                acc, l_i, m_i, r_nnz,
+                acc, l_i, m_i, r_nnz, SCORE_EXPSUM,
                 # Offsets
                 off_z, off_h, offs_m, offs_n,
                 MATMUL_PRECISION, RCP_LN2,
@@ -583,7 +586,7 @@ def forward_inner(
                 {{gen_argdefs()}},
                 q, K_block_ptr, V_block_ptr, Q_LEN, KV_LEN,
                 # accumulated values
-                acc, l_i, m_i, r_nnz,
+                acc, l_i, m_i, r_nnz, SCORE_EXPSUM,
                 # Offsets
                 off_z, off_h, offs_m, offs_n,
                 MATMUL_PRECISION, RCP_LN2,
@@ -612,12 +615,11 @@ def forward_block_mn(
     {{gen_argdefs()}},
     q, K_block_ptr, V_block_ptr, Q_LEN, KV_LEN,
     # accumulated values
-    acc, l_i, m_i, r_nnz,
+    acc, l_i, m_i, r_nnz, SCORE_EXPSUM,
     # Offsets
     off_z, off_h, offs_m, offs_n,
     MATMUL_PRECISION, RCP_LN2,
     IS_FULL_BLOCKS, CHECK_BLOCK_BOUNDARY=False,
-
 ):
     # Redefines all kernel parameters (BLOCK_M, etc.) so we don't need to plumb them all through
     {{gen_defines() | indent_except_first(1)}}
@@ -667,11 +669,18 @@ def forward_block_mn(
         # apply mask for partially unmasked blocks
         post_mod_scores = tl.where(mask_mod_output, post_mod_scores, float("-inf"))
 
-    post_mod_mask = tl.where(post_mod_scores > float("-inf"), 1, 0)
-    r_nnz = tl.sum(post_mod_mask, axis=-1) + r_nnz
-
     if not PRESCALE_QK:
         post_mod_scores *= RCP_LN2
+
+    if OUTPUT_NNZ:
+        normalized_post_mod_scores = tl.math.exp(post_mod_scores, axis=-1) / SCORE_EXPSUM 
+        post_mod_scores = tl.where(normalized_post_mod_scores < THRESHOLD, float("-inf"), post_mod_scores)
+
+    if OUTPUT_EXPSUM:
+        r_nnz = tl.sum(tl.math.exp(post_mod_scores), axis=-1) + r_nnz
+    else:
+        post_mod_mask = tl.where(post_mod_scores > float("-inf"), 1, 0)
+        r_nnz = tl.sum(post_mod_mask, axis=-1) + r_nnz
     # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
     # -- compute scaling constant ---
@@ -1294,6 +1303,7 @@ def flex_attention(
     score_mod_other_buffers,
     mask_mod_other_buffers,
 ):
+    
     if query.get_device().type == "cpu":
         return lower_cpu(
             query,
@@ -1457,14 +1467,28 @@ def flex_attention(
         dtype=torch.float32,  # The logsumexp is always stored in fp32 regardless of the input dtype
         device=query.get_device(),
     )
-    post_score_nnz_shape = [B, Hq, seq_len_q]
-    post_score_nnz = empty_strided(
-        post_score_nnz_shape,
+    post_score_feature_shape = [B, Hq, seq_len_q]
+    post_score_feature = empty_strided(
+        post_score_feature_shape,
         None,
-        dtype=torch.int32,
+        dtype=torch.float32,
         device=query.get_device(),
     )
     kernel_options.setdefault("SM_SCALE", scale)
+
+    # Extract score expsum from kernel options
+    score_expsum_shape = [B, Hq, seq_len_q]
+    score_expsum = empty_strided(
+        score_expsum_shape,
+        None,
+        dtype=torch.float32,
+        device=query.get_device(),
+    )
+    if kernel_options.get("OUTPUT_NNZ", False):
+        score_expsum = kernel_options.get("SCORE_EXPSUM", None)
+        assert score_expsum is not None, "nonzero count is requested but no score expsum provided!"
+        score_expsum = maybe_realize(score_expsum)
+        kernel_options.pop("SCORE_EXPSUM")
 
     # Determine GQA broadcast factor.
     gqa_shared_heads = Hq // Hkv
@@ -1552,11 +1576,12 @@ def flex_attention(
                 key,
                 value,
                 logsumexp,
-                post_score_nnz,
+                post_score_feature,
                 kv_num_blocks,
                 kv_indices,
                 full_kv_num_blocks,
                 full_kv_indices,
+                score_expsum,
             ],
             layout=layout,
             subgraphs=[
@@ -1577,11 +1602,12 @@ def flex_attention(
             key,
             value,
             logsumexp,
-            post_score_nnz,
+            post_score_feature,
             kv_num_blocks,
             kv_indices,
             full_kv_num_blocks,
             full_kv_indices,
+            score_expsum,
         ]
         + list(score_mod_other_buffers)
         + list(mask_mod_other_buffers)
@@ -1607,7 +1633,7 @@ def flex_attention(
             input_gen_fns=input_gen_fns,
         ),
         logsumexp,
-        post_score_nnz,
+        post_score_feature,
     )
 
 

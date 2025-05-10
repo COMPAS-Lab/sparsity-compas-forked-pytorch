@@ -266,7 +266,7 @@ def sdpa_dense(
     score_mod_other_buffers: tuple = (),
     mask_mod_other_buffers: tuple = (),
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    out, lse, nnz = math_attention(
+    out, lse, attn_feature = math_attention(
         query,
         key,
         value,
@@ -278,7 +278,7 @@ def sdpa_dense(
         mask_mod_other_buffers,
     )
     out = _permute_strides(out, query.stride())
-    return out, lse, nnz
+    return out, lse, attn_feature
 
 
 def trace_flex_attention(
@@ -457,11 +457,11 @@ def flex_attention_fake_impl(
     v_head_dim = value.size(-1)
     batch_size, num_heads, seq_len_q, _q_head_dim = query.shape
     logsumexp = query.new_empty(batch_size, num_heads, seq_len_q, dtype=torch.float32)
-    nnz = query.new_empty(batch_size, num_heads, seq_len_q, dtype=torch.int32)
+    attn_feature = query.new_empty(batch_size, num_heads, seq_len_q, dtype=torch.float32)
     out_shape = (batch_size, num_heads, seq_len_q, v_head_dim)
     out = query.new_empty(out_shape)
     out = _permute_strides(out, query.stride())
-    return out, logsumexp, nnz
+    return out, logsumexp, attn_feature
 
 
 @flex_attention.py_impl(FakeTensorMode)
@@ -478,8 +478,8 @@ def flex_attention_fake_tensor_mode(
     mask_mod_other_buffers: tuple = (),
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     with mode:
-        out, logsumexp, nnz = flex_attention_fake_impl(query, value)
-        return out, logsumexp, nnz
+        out, logsumexp, attn_feature = flex_attention_fake_impl(query, value)
+        return out, logsumexp, attn_feature
 
 
 # ---------------------------- Autograd Implementation ----------------------------
@@ -611,7 +611,7 @@ class FlexAttentionAutogradOp(torch.autograd.Function):
         ctx.kernel_options = kernel_options
         ctx._score_mod_other_buffers_len = len(score_mod_other_buffers)
         with torch._C._AutoDispatchBelowAutograd():
-            out, logsumexp, nnz = flex_attention(
+            out, logsumexp, attn_feature = flex_attention(
                 query,
                 key,
                 value,
@@ -636,7 +636,7 @@ class FlexAttentionAutogradOp(torch.autograd.Function):
                 *mask_mod_other_buffers,
             ),
         )
-        return out, logsumexp, nnz
+        return out, logsumexp, attn_feature
 
     @staticmethod
     def backward(ctx: Any, grad_out: Tensor, grad_logsumexp: Tensor) -> tuple[Optional[Tensor], ...]:  # type: ignore[override]
@@ -746,7 +746,7 @@ def flex_attention_autograd(
             )
         else:
             fw_graph, bw_graph = score_mod, None
-        out, logsumexp, nnz = FlexAttentionAutogradOp.apply(
+        out, logsumexp, attn_feature = FlexAttentionAutogradOp.apply(
             query,
             key,
             value,
@@ -758,7 +758,7 @@ def flex_attention_autograd(
             mask_mod_other_buffers,
             *score_mod_other_buffers,
         )
-    return out, logsumexp, nnz
+    return out, logsumexp, attn_feature
 
 
 # ---------------------------- Backward HOP Implementation ----------------------------

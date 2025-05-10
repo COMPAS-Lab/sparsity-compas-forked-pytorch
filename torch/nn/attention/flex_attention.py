@@ -1081,7 +1081,8 @@ def create_nested_block_mask(
 
 
 def _apply_kernel_options(
-    query: Tensor, key: Tensor, value: Tensor, return_lse: bool, return_nzeros: bool, kernel_options
+    query: Tensor, key: Tensor, value: Tensor,
+    return_lse: bool, return_nzeros: bool, return_expsum: bool, threshold: float, kernel_options
 ):
     kernel_options = {} if kernel_options is None else dict(kernel_options)
 
@@ -1094,7 +1095,9 @@ def _apply_kernel_options(
     # If forward kernel needs to return logsumexp is decided by this rule internally.
     assert "OUTPUT_LOGSUMEXP" not in kernel_options
     kernel_options["OUTPUT_LOGSUMEXP"] = True
-    kernel_options["OUTPUT_NNZ"] = return_nzeros
+    kernel_options["OUTPUT_EXPSUM"] = return_expsum
+    kernel_options["OUTPUT_NNZ"] = False if return_expsum else return_nzeros
+    kernel_options["THRESHOLD"] = threshold if return_nzeros else 0.0
 
     if not return_lse:
         # We used to check if q,k,v required grads but since captured buffers can require grad
@@ -1166,6 +1169,8 @@ def flex_attention(
     enable_gqa: bool = False,
     return_lse: bool = False,
     return_nzeros: bool = False,
+    return_expsum: bool = False,
+    threshold: Optional[float] = 0.0,
     kernel_options: Optional[dict[str, Any]] = None,
 ) -> dict[str, Tensor]:
     r"""This function implements scaled dot product attention with an arbitrary attention score modification function.
@@ -1315,6 +1320,8 @@ def flex_attention(
         value,
         return_lse,
         return_nzeros,
+        return_expsum,
+        threshold,
         kernel_options,
     )
 
@@ -1324,15 +1331,18 @@ def flex_attention(
             torch._dynamo.mark_static(x, -3)
             torch._dynamo.mark_static(x, -1)
 
-        out, lse, score_nnz = flex_attention_hop(
+        if kernel_options.get("SCORE_EXPSUM", None) is not None:
+            torch._dynamo.mark_static(kernel_options["SCORE_EXPSUM"], -2)
+
+        out, lse, attn_feature = flex_attention_hop(
             query, key, value, score_mod, block_mask.as_tuple(), scale, kernel_options  # type: ignore[union-attr]
         )
 
         func_ret = {"out": out}
         if return_lse:
             func_ret["lse"] = lse
-        if return_nzeros:
-            func_ret["nnz"] = score_nnz
+        if return_nzeros or return_expsum:
+            func_ret["attn_feature"] = attn_feature
 
         return func_ret
 
@@ -1358,7 +1368,7 @@ def flex_attention(
                         )
                     else:
                         backend = "eager"
-                    out, lse, score_nnz = torch.compile(
+                    out, lse, attn_feature = torch.compile(
                         _flex_attention_hop_wrapper, backend=backend, fullgraph=True
                     )(
                         query,
@@ -1373,7 +1383,7 @@ def flex_attention(
                     func_ret = {"out": out}
                     if return_lse:
                         func_ret["lse"] = lse
-                    if return_nzeros:
-                        func_ret["nnz"] = score_nnz
+                    if return_nzeros or return_expsum:
+                        func_ret["attn_feature"] = attn_feature
 
                     return func_ret
