@@ -81,6 +81,7 @@ class FlexAttentionHOP(HigherOrderOperator):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
+        score_expsum: torch.Tensor,
         score_mod: Callable,
         block_mask: tuple,
         scale: float,
@@ -93,6 +94,7 @@ class FlexAttentionHOP(HigherOrderOperator):
             query,
             key,
             value,
+            score_expsum,
             score_mod,
             block_mask,
             scale,
@@ -259,6 +261,7 @@ def sdpa_dense(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
+    score_expsum: torch.Tensor,
     score_mod: Callable,
     block_mask: tuple,
     scale: float,
@@ -286,6 +289,7 @@ def trace_flex_attention(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
+    score_expsum: torch.Tensor,
     score_mod: Callable,
     block_mask: tuple,
     scale: float,
@@ -305,6 +309,7 @@ def trace_flex_attention(
         query,
         key,
         value,
+        score_expsum,
         score_mod,
         block_mask,
         scale,
@@ -334,6 +339,7 @@ def trace_flex_attention(
         query,
         key,
         value,
+        score_expsum,
         score_graph,
         block_mask,
         scale,
@@ -356,6 +362,7 @@ def flex_attention_proxy_torch_dispatch_mode(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
+    score_expsum: torch.Tensor,
     score_mod: Callable,
     block_mask: tuple,
     scale: float,
@@ -369,6 +376,7 @@ def flex_attention_proxy_torch_dispatch_mode(
         query,
         key,
         value,
+        score_expsum,
         score_mod,
         block_mask,
         scale,
@@ -384,6 +392,7 @@ def flex_attention_functionalize(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
+    score_expsum: torch.Tensor,
     score_mod: Callable,
     block_mask: tuple,
     scale: float,
@@ -399,9 +408,12 @@ def flex_attention_functionalize(
     """
     from torch._dynamo._trace_wrapped_higher_order_op import TransformGetItemToIndex
 
+    print(f"score_exp_size: {score_expsum.size()}")
+
     query_unwrapped = ctx.unwrap_tensors(query)
     key_unwrapped = ctx.unwrap_tensors(key)
     value_unwrapped = ctx.unwrap_tensors(value)
+    score_expsum_unwrapped = ctx.unwrap_tensors(score_expsum)
     block_mask_unwrapped = ctx.unwrap_tensors(block_mask)
     score_mod_other_buffers_unwrapped = ctx.unwrap_tensors(score_mod_other_buffers)
     mask_mod_other_buffers_unwrapped = ctx.unwrap_tensors(mask_mod_other_buffers)
@@ -410,6 +422,7 @@ def flex_attention_functionalize(
     assert isinstance(query_unwrapped, torch.Tensor)
     assert isinstance(key_unwrapped, torch.Tensor)
     assert isinstance(value_unwrapped, torch.Tensor)
+    assert isinstance(score_expsum_unwrapped, torch.Tensor), f"actual type: {type(score_expsum_unwrapped)}"
     assert isinstance(block_mask_unwrapped, tuple)
     assert isinstance(score_mod_other_buffers_unwrapped, tuple)
     assert isinstance(mask_mod_other_buffers_unwrapped, tuple)
@@ -435,6 +448,7 @@ def flex_attention_functionalize(
             query_unwrapped,
             key_unwrapped,
             value_unwrapped,
+            score_expsum_unwrapped,
             functional_score_mod,
             block_mask_unwrapped,
             scale,
@@ -470,6 +484,7 @@ def flex_attention_fake_tensor_mode(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
+    score_expsum: torch.Tensor,
     score_mod: Callable,
     block_mask: tuple,
     scale: float,
@@ -719,6 +734,7 @@ def flex_attention_autograd(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
+    score_expsum: torch.Tensor,
     score_mod: Callable,
     block_mask: tuple,
     scale: float,
@@ -750,6 +766,7 @@ def flex_attention_autograd(
             query,
             key,
             value,
+            score_expsum,
             fw_graph,
             bw_graph,
             block_mask,

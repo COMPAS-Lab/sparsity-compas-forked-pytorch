@@ -1163,6 +1163,7 @@ def flex_attention(
     query: Tensor,
     key: Tensor,
     value: Tensor,
+    score_expsum: Tensor,
     score_mod: Optional[_score_mod_signature] = None,
     block_mask: Optional[BlockMask] = None,
     scale: Optional[float] = None,
@@ -1331,11 +1332,10 @@ def flex_attention(
             torch._dynamo.mark_static(x, -3)
             torch._dynamo.mark_static(x, -1)
 
-        if kernel_options.get("SCORE_EXPSUM", None) is not None:
-            torch._dynamo.mark_static(kernel_options["SCORE_EXPSUM"], -2)
+        torch._dynamo.mark_static(score_expsum, -2)
 
         out, lse, attn_feature = flex_attention_hop(
-            query, key, value, score_mod, block_mask.as_tuple(), scale, kernel_options  # type: ignore[union-attr]
+            query, key, value, score_expsum, score_mod, block_mask.as_tuple(), scale, kernel_options  # type: ignore[union-attr]
         )
 
         func_ret = {"out": out}
@@ -1374,6 +1374,7 @@ def flex_attention(
                         query,
                         key,
                         value,
+                        score_expsum,
                         score_mod,
                         block_mask.as_tuple(),  # type: ignore[union-attr]
                         scale,

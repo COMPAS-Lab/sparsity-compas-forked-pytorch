@@ -1296,6 +1296,7 @@ def flex_attention(
     query,
     key,
     value,
+    score_expsum,
     subgraph,
     block_mask,
     scale,
@@ -1400,6 +1401,7 @@ def flex_attention(
         query,
         key,
         value,
+        score_expsum,
         kv_num_blocks,
         kv_indices,
         full_kv_num_blocks,
@@ -1413,6 +1415,7 @@ def flex_attention(
             query,
             key,
             value,
+            score_expsum,
             kv_num_blocks,
             kv_indices,
             full_kv_num_blocks,
@@ -1477,18 +1480,8 @@ def flex_attention(
     kernel_options.setdefault("SM_SCALE", scale)
 
     # Extract score expsum from kernel options
-    score_expsum_shape = [B, Hq, seq_len_q]
-    score_expsum = empty_strided(
-        score_expsum_shape,
-        None,
-        dtype=torch.float32,
-        device=query.get_device(),
-    )
     if kernel_options.get("OUTPUT_NNZ", False):
-        score_expsum = kernel_options.get("SCORE_EXPSUM", None)
         assert score_expsum is not None, "nonzero count is requested but no score expsum provided!"
-        score_expsum = maybe_realize(score_expsum)
-        kernel_options.pop("SCORE_EXPSUM")
 
     # Determine GQA broadcast factor.
     gqa_shared_heads = Hq // Hkv
