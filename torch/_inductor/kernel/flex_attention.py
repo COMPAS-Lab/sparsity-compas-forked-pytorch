@@ -678,11 +678,11 @@ def forward_block_mn(
         post_mod_scores *= RCP_LN2
 
     if OUTPUT_NNZ:
-        normalized_post_mod_scores = tl.math.exp(post_mod_scores) / score_expsum 
+        normalized_post_mod_scores = tl.math.exp2(post_mod_scores) / score_expsum 
         post_mod_scores = tl.where(normalized_post_mod_scores < THRESHOLD, float("-inf"), post_mod_scores)
 
     if OUTPUT_EXPSUM:
-        r_nnz = tl.sum(tl.math.exp(post_mod_scores), axis=-1) + r_nnz
+        r_nnz = tl.sum(tl.math.exp2(post_mod_scores), axis=-1) + r_nnz
     else:
         post_mod_mask = tl.where(post_mod_scores > float("-inf"), 1, 0)
         r_nnz = tl.sum(post_mod_mask, axis=-1) + r_nnz
