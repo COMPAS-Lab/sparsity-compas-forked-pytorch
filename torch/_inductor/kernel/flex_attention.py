@@ -413,7 +413,12 @@ compute_flex_attention = r"""
     acc = tl.zeros([BLOCK_M, V_HEAD_DIM_ROUNDED], dtype=tl.float32)
 
     offs_m = q_start * BLOCK_M + tl.arange(0, BLOCK_M)
-    SCORE_EXPSUM = SCORE_EXPSUM + off_hz * Q_LEN + offs_m
+    score_expsum_offset = SCORE_EXPSUM + off_hz * Q_LEN + offs_m
+
+    if IS_DIVISIBLE:
+        score_expsum = tl.load(score_expsum_offset)
+    else:
+        score_expsum = tl.load(score_expsum_offset, mask=offs_m < Q_LEN)
 
     # KV_IDX and KV_NUM_BLKS are always contiguous.
     sparse_hz_offset = sparse_idx_z * SPARSE_HQ + sparse_idx_hq
@@ -458,7 +463,7 @@ compute_flex_attention = r"""
     acc, l_i, m_i, r_nnz_or_expsum = forward_inner(
         {{gen_argdefs()}},
         q, K_block_ptr, V_block_ptr, Q_LEN, KV_LEN,
-        acc, l_i, m_i, r_nnz_or_expsum, SCORE_EXPSUM,
+        acc, l_i, m_i, r_nnz_or_expsum, score_expsum,
         off_zq, off_hq, offs_m[:, None], offs_n[None, :],
         kv_indices, kv_num_blocks,
         0, block_n_end,
@@ -497,7 +502,7 @@ compute_flex_attention = r"""
         acc, l_i, m_i, r_nnz_or_expsum = forward_inner(
             {{gen_argdefs()}},
             q, K_block_ptr, V_block_ptr, Q_LEN, KV_LEN,
-            acc, l_i, m_i, r_nnz_or_expsum, SCORE_EXPSUM,
+            acc, l_i, m_i, r_nnz_or_expsum, score_expsum,
             off_zq, off_hq, offs_m[:, None], offs_n[None, :],
             kv_indices, kv_num_blocks,
             0, block_n_end,
@@ -544,7 +549,7 @@ def forward_inner(
     {{gen_argdefs()}},
     q, K_block_ptr, V_block_ptr, Q_LEN, KV_LEN,
     # accumulated values
-    acc, l_i, m_i, r_nnz, SCORE_EXPSUM,
+    acc, l_i, m_i, r_nnz, score_expsum,
     # Offsets used as inputs to score_mod & mask_mod
     # of size [BLOCK_M, BLOCK_N] or scalar.
     off_z, off_h, offs_m, offs_n,
@@ -571,7 +576,7 @@ def forward_inner(
                 {{gen_argdefs()}},
                 q, K_block_ptr, V_block_ptr, Q_LEN, KV_LEN,
                 # accumulated values
-                acc, l_i, m_i, r_nnz, SCORE_EXPSUM,
+                acc, l_i, m_i, r_nnz, score_expsum,
                 # Offsets
                 off_z, off_h, offs_m, offs_n,
                 MATMUL_PRECISION, RCP_LN2,
@@ -586,7 +591,7 @@ def forward_inner(
                 {{gen_argdefs()}},
                 q, K_block_ptr, V_block_ptr, Q_LEN, KV_LEN,
                 # accumulated values
-                acc, l_i, m_i, r_nnz, SCORE_EXPSUM,
+                acc, l_i, m_i, r_nnz, score_expsum,
                 # Offsets
                 off_z, off_h, offs_m, offs_n,
                 MATMUL_PRECISION, RCP_LN2,
@@ -615,7 +620,7 @@ def forward_block_mn(
     {{gen_argdefs()}},
     q, K_block_ptr, V_block_ptr, Q_LEN, KV_LEN,
     # accumulated values
-    acc, l_i, m_i, r_nnz, SCORE_EXPSUM,
+    acc, l_i, m_i, r_nnz, score_expsum,
     # Offsets
     off_z, off_h, offs_m, offs_n,
     MATMUL_PRECISION, RCP_LN2,
@@ -673,7 +678,7 @@ def forward_block_mn(
         post_mod_scores *= RCP_LN2
 
     if OUTPUT_NNZ:
-        normalized_post_mod_scores = tl.math.exp(post_mod_scores) / SCORE_EXPSUM 
+        normalized_post_mod_scores = tl.math.exp(post_mod_scores) / score_expsum 
         post_mod_scores = tl.where(normalized_post_mod_scores < THRESHOLD, float("-inf"), post_mod_scores)
 
     if OUTPUT_EXPSUM:
