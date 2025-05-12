@@ -673,7 +673,7 @@ def forward_block_mn(
         post_mod_scores *= RCP_LN2
 
     if OUTPUT_NNZ:
-        normalized_post_mod_scores = tl.math.exp(post_mod_scores, axis=-1) / SCORE_EXPSUM 
+        normalized_post_mod_scores = tl.math.exp(post_mod_scores) / SCORE_EXPSUM 
         post_mod_scores = tl.where(normalized_post_mod_scores < THRESHOLD, float("-inf"), post_mod_scores)
 
     if OUTPUT_EXPSUM:

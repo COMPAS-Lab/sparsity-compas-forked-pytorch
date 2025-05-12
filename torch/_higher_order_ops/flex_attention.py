@@ -408,8 +408,6 @@ def flex_attention_functionalize(
     """
     from torch._dynamo._trace_wrapped_higher_order_op import TransformGetItemToIndex
 
-    print(f"score_exp_size: {score_expsum.size()}")
-
     query_unwrapped = ctx.unwrap_tensors(query)
     key_unwrapped = ctx.unwrap_tensors(key)
     value_unwrapped = ctx.unwrap_tensors(value)
@@ -603,6 +601,7 @@ class FlexAttentionAutogradOp(torch.autograd.Function):
         query: Tensor,
         key: Tensor,
         value: Tensor,
+        score_expsum: Tensor,
         fw_graph: Callable,
         joint_graph: Callable,
         block_mask: tuple[Any, ...],
@@ -630,6 +629,7 @@ class FlexAttentionAutogradOp(torch.autograd.Function):
                 query,
                 key,
                 value,
+                score_expsum,
                 fw_graph,
                 block_mask,
                 scale,
