@@ -676,16 +676,6 @@ def forward_block_mn(
 
     if not PRESCALE_QK:
         post_mod_scores *= RCP_LN2
-
-    if OUTPUT_NNZ:
-        normalized_post_mod_scores = tl.math.exp2(post_mod_scores) / score_expsum 
-        post_mod_scores = tl.where(normalized_post_mod_scores < THRESHOLD, float("-inf"), post_mod_scores)
-
-    if OUTPUT_EXPSUM:
-        r_nnz = tl.sum(tl.math.exp2(post_mod_scores), axis=-1) + r_nnz
-    else:
-        post_mod_mask = tl.where(post_mod_scores > float("-inf"), 1, 0)
-        r_nnz = tl.sum(post_mod_mask, axis=-1) + r_nnz
     # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
     # -- compute scaling constant ---
@@ -695,6 +685,16 @@ def forward_block_mn(
         m_ij_masked = tl.where(masked_out_rows, 0, m_ij)
     else:
         m_ij_masked = m_ij
+
+    if OUTPUT_NNZ:
+        normalized_post_mod_scores = tl.math.exp2(post_mod_scores) / score_expsum[:, None] 
+        post_mod_scores = tl.where(normalized_post_mod_scores < THRESHOLD, float("-inf"), post_mod_scores) 
+
+    if OUTPUT_EXPSUM:
+        r_nnz = tl.sum(tl.math.exp2(post_mod_scores), axis=1) + r_nnz
+    else:
+        post_mod_mask = tl.where(post_mod_scores > float("-inf"), 1, 0)
+        r_nnz = tl.sum(post_mod_mask, axis=1) + r_nnz
 
     alpha = tl.math.exp2(m_i - m_ij_masked)
     p = tl.math.exp2(post_mod_scores - m_ij_masked[:, None])
